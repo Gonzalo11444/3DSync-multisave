@@ -2,6 +2,7 @@
 #include <json-c/json.h>
 #include <memory>
 #include <iostream>
+#include <sys/stat.h>
 
 const std::string CLIENT_ID = "z4n5nrlgoypivuw";
 
@@ -85,7 +86,7 @@ std::vector<ListResult> Dropbox::list_folder(std::string path) {
     auto http_code = _curl.getHTTPCode();
 
     if (http_code != 200) {
-       std::cout << "Download error: Received " << http_code << std::endl;
+       std::cout << "list_folder error: Received " << http_code << " for path '" << path << "': " << httpData << std::endl;
     } else {
         struct json_object *parsed_json;
         struct json_object *entries;
@@ -105,7 +106,9 @@ std::vector<ListResult> Dropbox::list_folder(std::string path) {
             json_object_object_get_ex(entry, "path_display", &path_display);
             json_object_object_get_ex(entry, ".tag", &tag);
 
-            if (std::string(json_object_get_string(tag)) == "file") {
+            std::string tag_str = std::string(json_object_get_string(tag));
+
+            if (tag_str == "file") {
                 json_object_object_get_ex(entry, "server_modified", &server_modified);
                 server_modified_str = std::string(json_object_get_string(server_modified));
             }
@@ -113,7 +116,8 @@ std::vector<ListResult> Dropbox::list_folder(std::string path) {
             ListResult lr = {
                 std::string(json_object_get_string(name)),
                 std::string(json_object_get_string(path_display)),
-                server_modified_str
+                server_modified_str,
+                tag_str
             };
 
             paths.push_back(lr);
@@ -147,8 +151,84 @@ void Dropbox::download(std::string path, std::string destPath) {
 
     auto http_code = _curl.getHTTPCode();
     if (http_code != 200) {
-       std::cout << "Download error: Received " << http_code << std::endl;
+       std::cout << "Download error: Received " << http_code << " for path '" << path << "'" << std::endl;
     }
 
     fclose(file);
+}
+
+// Creates every missing directory along "path" (equivalent to "mkdir -p").
+// Local-only helper, not part of the Dropbox class since it doesn't need
+// any Dropbox state; kept in this file because downloadPath() is currently
+// its only caller.
+static void makeDirsRecursive(std::string path) {
+    if (path.empty()) return;
+
+    std::string current;
+    size_t pos = 0;
+
+    if (path[0] == '/') {
+        current = "/";
+        pos = 1;
+    }
+
+    while (pos <= path.size()) {
+        size_t next = path.find('/', pos);
+        if (next == std::string::npos) next = path.size();
+
+        current += path.substr(pos, next - pos);
+
+        if (!current.empty() && current != "/") {
+            struct stat info;
+            if (stat(current.c_str(), &info) != 0) {
+                mkdir(current.c_str(), 0777);
+            }
+        }
+
+        if (next == path.size()) break;
+        current += "/";
+        pos = next + 1;
+    }
+}
+
+void Dropbox::_downloadFolderRecursive(std::string remotePath, std::string localBasePath, std::string relativePath) {
+    // A fresh Dropbox (and therefore fresh Curl handle) per list_folder/
+    // download call, same convention already used elsewhere in the
+    // codebase (see citra.h, which never reuses one Dropbox instance for
+    // more than one API call). Reusing "this"'s shared _curl across a
+    // list_folder() call followed by download() calls left stale internal
+    // curl state (from list_folder's POST body) that made the subsequent
+    // downloads fail with HTTP code 0.
+    Dropbox lister(_token);
+    std::vector<ListResult> entries = lister.list_folder(remotePath + relativePath);
+
+    for (auto entry : entries) {
+        std::string entryRelativePath = relativePath + "/" + entry.name;
+
+        if (entry.tag == "folder") {
+            _downloadFolderRecursive(remotePath, localBasePath, entryRelativePath);
+        } else if (entry.tag == "file") {
+            std::string localDir = localBasePath + relativePath;
+            std::string localFilePath = localBasePath + entryRelativePath;
+
+            makeDirsRecursive(localDir);
+
+            Dropbox downloader(_token);
+            downloader.download(entry.path_display, localFilePath);
+        } else {
+            std::cout << "Unknown entry type for " << entry.name << ", skipping" << std::endl;
+        }
+    }
+}
+
+void Dropbox::downloadPath(std::string dropboxPrefix, std::string localBasePath) {
+    // Mirrors the exact scheme used by upload(): Dropbox path = "/" + dropboxPrefix + relativePath
+    std::string remotePath = "/" + dropboxPrefix;
+
+    std::cout << "Starting download from Dropbox: " << remotePath << " -> " << localBasePath << std::endl;
+
+    makeDirsRecursive(localBasePath);
+    _downloadFolderRecursive(remotePath, localBasePath, "");
+
+    std::cout << "Finished downloading " << remotePath << std::endl << std::endl;
 }

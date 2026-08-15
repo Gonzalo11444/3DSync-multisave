@@ -33,6 +33,62 @@ std::vector<std::string> recurse_dir(std::string basepath, std::string additiona
     return paths;
 }
 
+// Reads the [Paths] section of the INI (excluding well-known keys like
+// "Checkpoint") into (localBasePath, dropboxPrefix) pairs. Extracted from
+// the block that used to live inline in main() so upload and the new
+// download flow can share it without duplicating the INI parsing logic.
+std::vector<std::pair<std::string, std::string>> getCustomPathPairs(INIReader &reader){
+    std::vector<std::pair<std::string, std::string>> pairs;
+    std::map<std::string, std::string> values = reader.GetValues();
+    for(auto value : values){
+        if(value.first.rfind("paths=", 0) == 0){
+            pairs.push_back(std::make_pair(value.second, value.first.substr(6)));
+        }
+    }
+    return pairs;
+}
+
+// Download-only flow: Dropbox -> custom paths -> 3DS.
+// Deliberately does NOT call upload() at any point, so it can never turn
+// into Dropbox -> 3DS -> Upload -> Dropbox and overwrite what's stored
+// remotely.
+void doDownload(std::string dropboxToken, std::vector<std::pair<std::string, std::string>> pathPairs){
+    if(pathPairs.empty()){
+        std::cout << "No custom paths configured in 3DSync.ini, nothing to download." << std::endl;
+        return;
+    }
+
+    Dropbox dropbox(dropboxToken);
+    for(auto pair : pathPairs){
+        std::string localBasePath = pair.first;
+        std::string dropboxPrefix = pair.second;
+        dropbox.downloadPath(dropboxPrefix, localBasePath);
+    }
+
+    std::cout << "Download from Dropbox finished." << std::endl;
+}
+void doUpload(std::string dropboxToken, std::vector<std::pair<std::string, std::string>> pathPairs){
+    std::map<std::pair<std::string, std::string>, std::vector<std::string>> paths;
+
+    for(auto pair : pathPairs){
+        paths[pair] = recurse_dir(pair.first);
+    }
+
+    Dropbox dropbox(dropboxToken);
+
+    if((int)paths.size() > 0){
+        dropbox.upload(paths);
+    }
+
+    std::cout << "Upload to Dropbox finished." << std::endl;
+}
+void printMenu(){
+    printf("\n\n--- 3DSync ---");
+    printf("\n[A]      Download from Dropbox");
+    printf("\n[B]      Upload to Dropbox");
+    printf("\n[START]  Exit\n");
+}
+
 bool componentsInit(){
     bool result = true;
     gfxInitDefault();
@@ -77,13 +133,19 @@ int main(int argc, char** argv){
 
     INIReader reader("/3ds/3DSync/3DSync.ini");
 
+    // Declared here (instead of only inside the block below) so the menu
+    // loop can offer "Download from Dropbox" using the same token/paths
+    // that were already parsed, without re-reading the INI or re-doing auth.
+    std::string dropboxToken = "";
+    std::vector<std::pair<std::string, std::string>> pathPairs;
+
     if(reader.ParseError() < 0){
         printf("Can't load configuration\n");
     } else {
         std::string refreshToken = reader.Get("Dropbox", "RefreshToken", "");
         
         if(refreshToken != ""){
-            std::string dropboxToken = get_dropbox_access_token(refreshToken);
+            dropboxToken = get_dropbox_access_token(refreshToken);
             if (dropboxToken == "") {
                 std::cout << "Failed to receive Dropbox access token, exiting" << std::endl;
                 return 1;
@@ -96,28 +158,27 @@ int main(int argc, char** argv){
                 std::cout << "Finished downloading Citra saves!" << std::endl << std::endl;
             }
 
-            // Upload to Dropbox
-            std::map<std::string, std::string> values = reader.GetValues();
-            std::map<std::pair<std::string, std::string>, std::vector<std::string>> paths;
-            for(auto value : values){
-                if(value.first.rfind("paths=", 0) == 0){
-                    std::pair<std::string, std::string> key = std::make_pair(value.second, value.first.substr(6));
-                    paths[key] = recurse_dir(value.second);
-                }
-            }
-            Dropbox dropbox(dropboxToken);
-            if((int)paths.size() > 0) dropbox.upload(paths);
+            // Parse custom paths for the manual upload/download actions.
+pathPairs = getCustomPathPairs(reader);
         } else {
             printf("Can't load Dropbox token from 3DSync.ini\n");
         }
 
     }
 
-    printf("\n\nPress START to exit...");
+    printMenu();
     while (aptMainLoop()){
         hidScanInput();
         u32 kDown = hidKeysDown();
         if (kDown & KEY_START) break;
+        if ((kDown & KEY_A) && dropboxToken != ""){
+            doDownload(dropboxToken, pathPairs);
+            printMenu();
+        }
+        if ((kDown & KEY_B) && dropboxToken != ""){
+            doUpload(dropboxToken, pathPairs);
+            printMenu();
+        }
         gfxFlushBuffers();
         gfxSwapBuffers();
         gspWaitForVBlank();

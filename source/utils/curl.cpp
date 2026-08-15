@@ -5,7 +5,7 @@ Curl::Curl(){
     _curl = curl_easy_init();
     if(!_curl) printf("Failed to init libcurl.\n");
     // Comment out next line for non-3DS builds
-    curl_easy_setopt(_curl, CURLOPT_USERAGENT, "3DSync/" VERSION_STRING);
+    //curl_easy_setopt(_curl, CURLOPT_USERAGENT, "3DSync/" VERSION_STRING);
     curl_easy_setopt(_curl, CURLOPT_CONNECTTIMEOUT, 50L);
     curl_easy_setopt(_curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(_curl, CURLOPT_FAILONERROR, 1L);
